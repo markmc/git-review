@@ -37,6 +37,7 @@ import time
 import re
 import shlex
 import subprocess
+import tempfile
 
 version = "1.18"
 
@@ -627,6 +628,8 @@ def list_reviews(remote, branch, list_mine=False):
     count = 0
     try:
         for r in reviews:
+            # FIXME(markmc): add ability to filter on tags
+
             change = "%s(%d)" % (r.shortid, r.number)
             owner = r.owner.username
             if check_color_support():
@@ -645,8 +648,14 @@ def list_reviews(remote, branch, list_mine=False):
             vscore = format_score("V", r.patchset.verified_score)
             ascore = format_score("A", r.patchset.approved_score, neg=False)
 
-            print("%s [%s %s %s]  %s  (%s)" %
-                  (change, rscore, vscore, ascore, r.subject, owner))
+            tags = get_tags(project_name, branch, r)
+            if tags:
+                tags = "[" + ",".join(tags) + "]"
+            else:
+                tags = ""
+
+            print("%s [%s %s %s]  %s  (%s) %s" %
+                  (change, rscore, vscore, ascore, r.subject, owner, tags))
             count += 1
     except:
         print("Could not parse json query response:", sys.exc_info()[1])
@@ -654,6 +663,74 @@ def list_reviews(remote, branch, list_mine=False):
 
     print("Found %d items for review" % count)
     return 0
+
+
+def read_notes(project, branch):
+    notesfile = os.path.join(CONFIGDIR, "notes", project, branch + ".json")
+
+    if not os.path.exists(notesfile):
+        return {}
+
+    return json.loads(open(notesfile).read())
+
+
+def write_notes(project, branch, notes):
+    notesfile = os.path.join(CONFIGDIR, "notes", project, branch + ".json")
+
+    if not os.path.exists(os.path.dirname(notesfile)):
+        os.makedirs(os.path.dirname(notesfile))
+
+    (fd, tmpfile) = tempfile.mkstemp(prefix=notesfile + ".")
+
+    try:
+        os.write(fd, json.dumps(notes))
+        os.close(fd)
+        fd = None
+        os.rename(tmpfile, notesfile)
+        tmpfile = None
+    except Exception, e:
+        print("Failed to write notes to %s: %s" % (notesfile, e))
+        if fd:
+            os.close(fd)
+        if tmpfile:
+            os.remove(tmpfile)
+        return 1
+
+    return 0
+
+
+def tag_review(review, tags, remote, branch):
+    # FIXME(markmc): normalize ID to full ID
+
+    project_name = parse_git_show(remote, "Push")[-1]
+
+    notes = read_notes(project_name, branch)
+
+    if not review in notes:
+        notes[review] = {}
+
+    if not 'tags' in notes[review]:
+        notes[review]['tags'] = []
+
+    taglist = notes[review]['tags']
+
+    for tag in tags:
+        if tag == 'none':
+            del taglist[:]
+        elif tag not in taglist:
+            taglist.append(tag)
+
+    write_notes(project_name, branch, notes)
+
+
+def get_tags(project, branch, review):
+    # FIXME(markmc): add an implicit 'mine' note if this user
+    # is the review owner
+    # FIXME(markmc): use full ID instead of shortid
+    notes = read_notes(project, branch)
+    if review.shortid not in notes or 'tags' not in notes[review.shortid]:
+        return []
+    return notes[review.shortid]['tags']
 
 
 def download_review(review, remote, masterbranch):
@@ -800,6 +877,12 @@ def do_list(options, config):
     return list_reviews(remote, branch, list_mine)
 
 
+def do_tag(options, config):
+    (remote, branch) = check_remote(options, config)
+    return tag_review(options.review, options.tags,
+                      options.remote, options.branch)
+
+
 def do_download(options, config):
     (remote, branch) = check_remote(options, config)
     return download_review(options.download, remote, branch)
@@ -883,7 +966,7 @@ def default_to_upload(argv):
     COMMON_ARGS = ["-h", "--help",
                    "--verbose", "-u", "--update",
                    "--version", "-v",  "--license"]
-    ACTIONS = ["upload", "setup", "list", "download", "open"]
+    ACTIONS = ["upload", "setup", "list", "tag", "download", "open"]
 
     i = 0
     while i < len(argv) and argv[i] in COMMON_ARGS:
@@ -989,6 +1072,12 @@ def main():
                          help="List only the reviews in is:reviewable")
     add_branch_and_remote(lparser)
     lparser.set_defaults(func=do_list, list_mine=False)
+
+    tparser = subparsers.add_parser("tag")
+    tparser.add_argument("review")
+    tparser.add_argument("tags", nargs="+")
+    add_branch_and_remote(tparser)
+    tparser.set_defaults(func=do_tag)
 
     dparser = subparsers.add_parser("download")
     dparser.add_argument("download")
